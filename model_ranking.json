@@ -1,0 +1,8 @@
+{
+  "debit_card": ["lgbm", "lama", "catboost"],
+  "deposit": ["catboost", "lgbm", "lama"],
+  "auto_loan": ["catboost", "lgbm", "lama"],
+  "bank_subscription": ["catboost", "lgbm", "lama"],
+  "credit_card": ["catboost", "lama", "lgbm"],
+  "cash_loan": ["lama", "catboost", "lgbm"]
+}

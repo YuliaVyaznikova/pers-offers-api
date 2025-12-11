@@ -1,0 +1,8 @@
+{
+  "debit_card": "df_0.csv",
+  "deposit": "df_1.csv",
+  "auto_loan": "df_2.csv",
+  "bank_subscription": "df_4.csv",
+  "credit_card": "df_5.csv",
+  "cash_loan": "df_6.csv"
+}
