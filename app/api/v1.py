@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from app.schemas.optimize import OptimizeRequest, OptimizeResponse
 from app.services.optimizer import run_optimizer
+import time
 
 router = APIRouter()
 
@@ -19,7 +20,7 @@ async def optimize(req: OptimizeRequest):
     if min_cost > 0 and req.budget > 0 and req.budget < min_cost:
         raise HTTPException(status_code=400, detail={"error": "validation_failed", "messages": ["budget_too_small_min_cost"]})
 
-    # Call real optimizer service (greedy heuristic over CSV-based affinities)
+    t0 = time.time()
     result = run_optimizer(
         frontend_model=req.model,
         budget=req.budget,
@@ -27,6 +28,8 @@ async def optimize(req: OptimizeRequest):
         channels=req.channels,
         products=req.products,
     )
+    dt = time.time() - t0
+    print(f"/optimize done in {dt:.3f}s; channels={len(req.channels)} products={len(req.products)} budget={req.budget}")
 
     return OptimizeResponse(
         summary=tuple(result["summary"]),

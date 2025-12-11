@@ -1,5 +1,6 @@
 from functools import lru_cache
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
 from pathlib import Path
 
 PROJ_ROOT = Path(__file__).resolve().parent.parent.parent  # .../pers-offers-api
