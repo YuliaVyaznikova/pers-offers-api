@@ -1,0 +1,8 @@
+{
+  "sms": 0.15,
+  "push": 0.15,
+  "phone": 0.05,
+  "email": 0.025,
+  "social": 0.025,
+  "web_banner": 0.025
+}

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=PROJ_ROOT / "df")
     product_csv_map_path: Path = Field(default=PROJ_ROOT / "product_csv_map.json")
     model_ranking_path: Path = Field(default=PROJ_ROOT / "model_ranking.json")
+    rr_defaults_path: Path = Field(default=PROJ_ROOT / "rr_defaults.json")
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

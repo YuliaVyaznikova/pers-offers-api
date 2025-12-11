@@ -161,14 +161,39 @@ def run_optimizer(frontend_model: str, budget: float, enable_rr: bool, channels:
     Returns dict(summary, channels_usage, products_distribution) compatible with OptimizeResponse.
     """
     # normalize channels to (limit, cost, rr)
-    # if enable_rr is False, set rr=base depending on frontend_model
-    base_rr = 0.02 if frontend_model == "model1" else (0.018 if frontend_model == "model2" else 0.017)
+    # when enable_rr is False, use per-channel defaults from JSON config with fallback
+    st = get_settings()
+    default_rr_map = {
+        "sms": 0.15,
+        "push": 0.15,
+        "phone": 0.05,
+        "email": 0.025,
+        "social": 0.025,
+        "web_banner": 0.025,
+    }
+    try:
+        with open(st.rr_defaults_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict):
+                # normalize keys to lower-case
+                default_rr_map.update({str(k).lower(): float(v) for k, v in loaded.items()})
+    except Exception as e:
+        print(f"[optimizer][warn] cannot load rr defaults from {st.rr_defaults_path}: {e}; using built-ins")
     ch3: Dict[str, Tuple[int, float, float]] = {}
+    rr_debug: List[str] = []
     for k, arr in channels.items():
         limit = int(arr[0]) if len(arr) >= 1 else 0
         cost = float(arr[1]) if len(arr) >= 2 else 0.0
-        rr = float(arr[2]) if (enable_rr and len(arr) >= 3) else base_rr
-        ch3[k] = (max(0, limit), max(0.0, cost), max(0.0, min(1.0, rr)))
+        if enable_rr and len(arr) >= 3:
+            rr = float(arr[2])
+            src = "user"
+        else:
+            rr = float(default_rr_map.get(k, 0.025))
+            src = "default"
+        rr = max(0.0, min(1.0, rr))
+        ch3[k] = (max(0, limit), max(0.0, cost), rr)
+        rr_debug.append(f"{k}={rr}({src})")
+    print(f"[optimizer] resolved channel rr: {', '.join(rr_debug)}")
 
     t0 = time.time()
     df_base = _build_base_df(products, frontend_model)
