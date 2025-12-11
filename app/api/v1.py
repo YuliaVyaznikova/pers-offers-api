@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from app.schemas.optimize import OptimizeRequest, OptimizeResponse
-from app.services.optimizer import run_optimizer
+from app.services.optimizer import run_optimizer, run_optimizer_csv
+from fastapi.responses import Response
 import time
 
 router = APIRouter()
@@ -36,3 +37,17 @@ async def optimize(req: OptimizeRequest):
         channels_usage={k: tuple(v) for k, v in result["channels_usage"].items()},
         products_distribution={k: tuple(v) for k, v in result["products_distribution"].items()},
     )
+
+
+@router.post("/optimize_csv")
+async def optimize_csv(req: OptimizeRequest):
+    if not req.channels or not req.products:
+        raise HTTPException(status_code=400, detail={"error": "validation_failed", "messages": ["no_channels_or_products"]})
+    csv_text = run_optimizer_csv(
+        frontend_model=req.model,
+        budget=req.budget,
+        enable_rr=req.enable_rr,
+        channels=req.channels,
+        products=req.products,
+    )
+    return Response(content=csv_text, media_type="text/csv")

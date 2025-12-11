@@ -247,3 +247,47 @@ def run_optimizer(frontend_model: str, budget: float, enable_rr: bool, channels:
             products_distribution[pid] = (0, 0.0)
 
     return {"summary": summary, "channels_usage": channels_usage, "products_distribution": products_distribution}
+
+
+def run_optimizer_csv(frontend_model: str, budget: float, enable_rr: bool, channels: Dict[str, List[float]], products: Dict[str, float]) -> str:
+    """
+    Same inputs as run_optimizer. Returns CSV text for the selected offers.
+    Columns: client_id, product_id, canal_id, cost, expected_revenue
+    """
+    # resolve rr and build as in run_optimizer
+    st = get_settings()
+    default_rr_map = {
+        "sms": 0.15,
+        "push": 0.15,
+        "phone": 0.05,
+        "email": 0.025,
+        "social": 0.025,
+        "web_banner": 0.025,
+    }
+    try:
+        with open(st.rr_defaults_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+            if isinstance(loaded, dict):
+                default_rr_map.update({str(k).lower(): float(v) for k, v in loaded.items()})
+    except Exception:
+        pass
+    ch3: Dict[str, Tuple[int, float, float]] = {}
+    for k, arr in channels.items():
+        limit = int(arr[0]) if len(arr) >= 1 else 0
+        cost = float(arr[1]) if len(arr) >= 2 else 0.0
+        if enable_rr and len(arr) >= 3:
+            rr = float(arr[2])
+        else:
+            rr = float(default_rr_map.get(k, 0.025))
+        rr = max(0.0, min(1.0, rr))
+        ch3[k] = (max(0, limit), max(0.0, cost), rr)
+
+    df_base = _build_base_df(products, frontend_model)
+    df_res = _solve_greedy(df_base, ch3, float(budget))
+    if df_res.empty:
+        return "client_id,product_id,canal_id,cost,expected_revenue\n"
+    # ensure column order and export
+    export_cols = ["client_id", "product_id", "canal_id", "cost", "expected_revenue"]
+    present = [c for c in export_cols if c in df_res.columns]
+    csv_text = df_res[present].to_csv(index=False)
+    return csv_text
