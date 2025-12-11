@@ -4,6 +4,7 @@ from functools import lru_cache
 from typing import Dict, List, Tuple
 
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -43,6 +44,7 @@ def _resolve_actual_model_for_product(product_id: str, frontend_model: str) -> s
 
 
 def _read_product_df(product_id: str, actual_model: str) -> pd.DataFrame:
+    t0 = time.time()
     st = get_settings()
     csv_map = _load_product_csv_map()
     filename = csv_map.get(product_id)
@@ -52,6 +54,7 @@ def _read_product_df(product_id: str, actual_model: str) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"CSV file not found: {path}")
 
+    print(f"[optimizer] reading CSV for product='{product_id}' model='{actual_model}' file='{path.name}' ...")
     df = pd.read_csv(path)
     user_col = "user_id" if "user_id" in df.columns else df.columns[0]
     proba_col = MODEL_COL.get(actual_model)
@@ -68,36 +71,51 @@ def _read_product_df(product_id: str, actual_model: str) -> pd.DataFrame:
     clean = clean.dropna()
     clean = clean[clean["affinity_prob"] > 1e-6].copy()
     clean["product_id"] = product_id
+    elapsed = time.time() - t0
+    print(f"[optimizer] CSV loaded product='{product_id}' rows={len(clean)} in {elapsed:.3f}s")
     return clean
 
 
 def _build_base_df(products: Dict[str, float], frontend_model: str) -> pd.DataFrame:
+    t0 = time.time()
     frames: List[pd.DataFrame] = []
     for pid, revenue in products.items():
         actual = _resolve_actual_model_for_product(pid, frontend_model)
+        print(f"[optimizer] model mapping product='{pid}' frontend='{frontend_model}' -> actual='{actual}'")
         dfp = _read_product_df(pid, actual)
         dfp["product_revenue"] = float(revenue)
         frames.append(dfp)
     if not frames:
         raise ValueError("No product data loaded")
-    return pd.concat(frames, ignore_index=True)
+    base = pd.concat(frames, ignore_index=True)
+    print(f"[optimizer] base dataframe built rows={len(base)} in {time.time()-t0:.3f}s")
+    return base
 
 
 def _solve_greedy(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, float]], budget: float) -> pd.DataFrame:
     # channels: name -> (limit, cost, prob)
+    t_all = time.time()
     chan_records = [
         {"canal_id": k, "channel_cost": float(v[1]), "channel_prob": float(v[2])}
         for k, v in channels.items()
     ]
     df_channels = pd.DataFrame(chan_records)
+    t_merge0 = time.time()
     df_full = df_base.merge(df_channels, how="cross")
+    t_merge = time.time() - t_merge0
 
     df_full["expected_revenue"] = (
         df_full["product_revenue"] * df_full["affinity_prob"] * df_full["channel_prob"]
     )
+    before_filter = len(df_full)
+    t_filter0 = time.time()
     df_full = df_full[df_full["expected_revenue"] > df_full["channel_cost"]].copy()
+    t_filter = time.time() - t_filter0
+    after_filter = len(df_full)
+    t_sort0 = time.time()
     df_full["roi_score"] = df_full["expected_revenue"] / df_full["channel_cost"]
     df_full.sort_values(by="roi_score", ascending=False, inplace=True)
+    t_sort = time.time() - t_sort0
 
     used_clients = set()
     chan_usage = {k: 0 for k in channels}
@@ -110,6 +128,7 @@ def _solve_greedy(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, f
     channel_vals = df_full["canal_id"].values
     cost_vals = df_full["channel_cost"].values
 
+    t_loop0 = time.time()
     for i in range(len(idx_vals)):
         cost = float(cost_vals[i])
         if spent + cost > budget:
@@ -129,6 +148,11 @@ def _solve_greedy(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, f
 
     res = df_full.loc[selected_idx].copy()
     res.rename(columns={"channel_cost": "cost"}, inplace=True)
+    t_loop = time.time() - t_loop0
+    print(
+        f"[optimizer] merge={t_merge:.3f}s rows_before={before_filter} filter={t_filter:.3f}s rows_after={after_filter} "
+        f"sort={t_sort:.3f}s loop={t_loop:.3f}s selected={len(res)} spent={spent:.2f} total={time.time()-t_all:.3f}s"
+    )
     return res
 
 
@@ -146,8 +170,10 @@ def run_optimizer(frontend_model: str, budget: float, enable_rr: bool, channels:
         rr = float(arr[2]) if (enable_rr and len(arr) >= 3) else base_rr
         ch3[k] = (max(0, limit), max(0.0, cost), max(0.0, min(1.0, rr)))
 
+    t0 = time.time()
     df_base = _build_base_df(products, frontend_model)
     df_res = _solve_greedy(df_base, ch3, float(budget))
+    print(f"[optimizer] total optimization time={time.time()-t0:.3f}s (base+solve)")
 
     # Build response
     if df_res.empty:
