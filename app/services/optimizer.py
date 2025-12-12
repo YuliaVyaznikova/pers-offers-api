@@ -281,9 +281,15 @@ def _solve_mip(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, floa
     for ch in channel_names:
         m += xsum(x_vars[k] for k in ch_to_keys.get(ch, [])) <= ch_limit.get(ch, 0)
 
+    # Time limit (seconds)
+    try:
+        m.max_seconds = 120
+    except Exception:
+        pass
     t0 = time.time()
     m.optimize()
-    print(f"[optimizer][mip] solved in {time.time()-t0:.3f}s status={getattr(m, 'status', None)} obj={getattr(m, 'objective_value', None)}")
+    elapsed = time.time() - t0
+    print(f"[optimizer][mip] solved in {elapsed:.3f}s status={getattr(m, 'status', None)} obj={getattr(m, 'objective_value', None)}")
 
     rows: List[Dict[str, any]] = []
     ok = hasattr(m, 'status') and m.status in (OptimizationStatus.OPTIMAL, OptimizationStatus.FEASIBLE)
@@ -302,7 +308,9 @@ def _solve_mip(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, floa
                     'expected_revenue': float(rev_coeff[(ridx, ch)]),
                 })
     else:
-        print("[optimizer][mip] no feasible solution; returning empty")
+        # If time limit hit or no feasible solution, fallback to greedy
+        print("[optimizer][mip][warn] no feasible/timeout -> fallback to greedy")
+        return _solve_greedy(df_base, channels, budget)
 
     return pd.DataFrame(rows)
 
