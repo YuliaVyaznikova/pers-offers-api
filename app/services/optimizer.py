@@ -58,11 +58,16 @@ def _read_product_df(product_id: str, actual_model: str) -> pd.DataFrame:
     if not filename:
         raise FileNotFoundError(f"No CSV mapped for product {product_id}")
     path = (st.data_dir / filename).resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"CSV file not found: {path}")
-
-    print(f"[optimizer] reading CSV for product='{product_id}' model='{actual_model}' file='{path.name}' ...")
-    df = pd.read_csv(path)
+    # Prefer Parquet if exists next to CSV (same stem)
+    pqt_path = path.with_suffix('.parquet')
+    if pqt_path.exists():
+        print(f"[optimizer] reading PARQUET for product='{product_id}' model='{actual_model}' file='{pqt_path.name}' ...")
+        df = pd.read_parquet(pqt_path)
+    else:
+        if not path.exists():
+            raise FileNotFoundError(f"CSV file not found: {path}")
+        print(f"[optimizer] reading CSV for product='{product_id}' model='{actual_model}' file='{path.name}' ...")
+        df = pd.read_csv(path)
     user_col = "user_id" if "user_id" in df.columns else df.columns[0]
     proba_col = MODEL_COL.get(actual_model)
     if proba_col not in df.columns:
@@ -78,6 +83,12 @@ def _read_product_df(product_id: str, actual_model: str) -> pd.DataFrame:
     clean = clean.dropna()
     clean = clean[clean["affinity_prob"] > 1e-6].copy()
     clean["product_id"] = product_id
+    # Limit per product to top-10000 by affinity to cap problem size in prod
+    TOP_K_PER_PRODUCT = 10000
+    if len(clean) > TOP_K_PER_PRODUCT:
+        clean.sort_values("affinity_prob", ascending=False, inplace=True)
+        clean = clean.head(TOP_K_PER_PRODUCT).copy()
+        print(f"[optimizer] cap product='{product_id}' to top{TOP_K_PER_PRODUCT} by affinity; rows={len(clean)}")
     elapsed = time.time() - t0
     print(f"[optimizer] CSV loaded product='{product_id}' rows={len(clean)} in {elapsed:.3f}s")
     return clean
