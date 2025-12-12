@@ -181,6 +181,7 @@ def _solve_mip(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, floa
 
     m = Model(sense=MAXIMIZE, solver_name='CBC')
     m.verbose = 0
+    print(f"[optimizer][mip] building model solver='CBC' rows={len(df_base)} channels={len(channel_names)} budget={budget}")
 
     # Переменные решения и коэффициенты
     # ключ будет (row_index, channel)
@@ -189,6 +190,7 @@ def _solve_mip(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, floa
     cost_coeff: Dict[Tuple[int, str], float] = {}
 
     total_candidates = len(df_base) * len(channel_names)
+    print(f"[optimizer][mip] total_candidates={total_candidates}")
     for row in df_base.itertuples(index=True):
         ridx = int(row.Index)
         p_aff = float(getattr(row, 'affinity_prob'))
@@ -204,7 +206,9 @@ def _solve_mip(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, floa
             cost_coeff[key] = cost
 
     if not x_vars:
+        print("[optimizer][mip] no variables created; returning empty result")
         return pd.DataFrame(columns=["client_id", "product_id", "canal_id", "cost", "expected_revenue"])  # empty
+    print(f"[optimizer][mip] created_variables={len(x_vars)}")
 
     # Целевая: maximize sum(x * (rev - cost))
     m.objective = xsum(x_vars[k] * (rev_coeff[k] - cost_coeff[k]) for k in x_vars)
@@ -232,7 +236,12 @@ def _solve_mip(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, floa
     except Exception:
         pass
     t0 = time.time()
-    m.optimize()
+    try:
+        m.optimize()
+    except Exception as e:
+        elapsed = time.time() - t0
+        print(f"[optimizer][mip][error] optimize failed after {elapsed:.3f}s: {e}; fallback to greedy")
+        return _solve_greedy(df_base, channels, budget)
     elapsed = time.time() - t0
     print(f"[optimizer][mip] solved in {elapsed:.3f}s status={getattr(m, 'status', None)} obj={getattr(m, 'objective_value', None)}")
 
