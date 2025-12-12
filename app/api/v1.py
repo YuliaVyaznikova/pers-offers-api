@@ -1,6 +1,5 @@
 from fastapi import APIRouter, HTTPException
 from app.schemas.optimize import OptimizeRequest, OptimizeResponse
-from app.services.optimizer import run_optimizer, run_optimizer_csv
 from fastapi.responses import Response
 import time
 
@@ -12,6 +11,8 @@ async def health():
 
 @router.post("/optimize", response_model=OptimizeResponse)
 async def optimize(req: OptimizeRequest):
+    # Lazy import to avoid heavy module import at cold start
+    from app.services.optimizer import run_optimizer
     # Early validation heuristics
     if not req.channels:
         raise HTTPException(status_code=400, detail={"error": "validation_failed", "messages": ["no_channels"]})
@@ -42,6 +43,8 @@ async def optimize(req: OptimizeRequest):
 
 @router.post("/optimize_csv")
 async def optimize_csv(req: OptimizeRequest):
+    # Lazy import to avoid heavy module import at cold start
+    from app.services.optimizer import run_optimizer_csv
     if not req.channels or not req.products:
         raise HTTPException(status_code=400, detail={"error": "validation_failed", "messages": ["no_channels_or_products"]})
     csv_text = run_optimizer_csv(
