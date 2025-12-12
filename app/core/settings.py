@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     model_ranking_path: Path = Field(default=PROJ_ROOT / "model_ranking.json")
     rr_defaults_path: Path = Field(default=PROJ_ROOT / "rr_defaults.json")
 
+    # Redis URL for distributed queue/locks (e.g., redis://:pass@host:port/0)
+    redis_url: str | None = Field(default=None)
+    # Max number of concurrent MIP solves cluster-wide
+    mip_max_concurrency: int = Field(default=1)
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
