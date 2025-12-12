@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException
 from app.schemas.optimize import OptimizeRequest, OptimizeResponse
 from fastapi.responses import Response
 import time
+import asyncio
+from typing import Dict, Any
 
 router = APIRouter()
 
@@ -56,3 +58,84 @@ async def optimize_csv(req: OptimizeRequest):
         advanced=req.advanced,
     )
     return Response(content=csv_text, media_type="text/csv")
+
+
+# ---- Simple in-memory queue for MIP with concurrency limit ----
+_JOBS: Dict[str, Dict[str, Any]] = {}
+_JOB_COUNTER = 0
+_MIP_SEM = asyncio.Semaphore(1)  # allow only 1 MIP at a time; adjust to 2 if needed
+
+
+async def _run_job(job_id: str, req: OptimizeRequest) -> None:
+    global _JOBS
+    started = time.time()
+    _JOBS[job_id]["status"] = "running"
+    _JOBS[job_id]["started_at"] = started
+    try:
+        # Lazy import
+        from app.services.optimizer import run_optimizer
+        if req.advanced:
+            async with _MIP_SEM:
+                t0 = time.time()
+                res = run_optimizer(
+                    frontend_model=req.model,
+                    budget=req.budget,
+                    enable_rr=req.enable_rr,
+                    channels=req.channels,
+                    products=req.products,
+                    advanced=True,
+                )
+                _JOBS[job_id]["solve_ms"] = int((time.time() - t0) * 1000)
+        else:
+            res = run_optimizer(
+                frontend_model=req.model,
+                budget=req.budget,
+                enable_rr=req.enable_rr,
+                channels=req.channels,
+                products=req.products,
+                advanced=False,
+            )
+        _JOBS[job_id]["status"] = "done"
+        _JOBS[job_id]["result"] = res
+    except Exception as e:
+        _JOBS[job_id]["status"] = "error"
+        _JOBS[job_id]["error"] = str(e)
+    finally:
+        _JOBS[job_id]["finished_at"] = time.time()
+
+
+@router.post("/optimize_async")
+async def optimize_async(req: OptimizeRequest):
+    """Create a job and return job_id immediately. The client should poll /jobs/{id}."""
+    global _JOB_COUNTER, _JOBS
+    _JOB_COUNTER += 1
+    job_id = f"job-{_JOB_COUNTER}-{int(time.time())}"
+    _JOBS[job_id] = {
+        "status": "queued",
+        "created_at": time.time(),
+        "advanced": bool(req.advanced),
+    }
+    # fire-and-forget background task
+    asyncio.create_task(_run_job(job_id, req))
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = _JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    # If done, shape the response similarly to OptimizeResponse for convenience
+    if job.get("status") == "done" and isinstance(job.get("result"), dict):
+        r = job["result"]
+        return {
+            "job_id": job_id,
+            "status": job["status"],
+            "result": {
+                "summary": tuple(r.get("summary", ())),
+                "channels_usage": {k: tuple(v) for k, v in r.get("channels_usage", {}).items()},
+                "products_distribution": {k: tuple(v) for k, v in r.get("products_distribution", {}).items()},
+            },
+            "solve_ms": job.get("solve_ms"),
+        }
+    return {"job_id": job_id, **job}
