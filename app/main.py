@@ -14,3 +14,8 @@ app.add_middleware(
 
 # Mount versioned API
 app.include_router(api_router)
+
+# Simple root endpoint for uptime checks
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "pers-offers-api"}
