@@ -11,6 +11,13 @@ import pandas as pd
 
 from app.core.settings import get_settings
 
+# Optional MIP solver import (fallback to greedy if unavailable)
+try:
+    from mip import Model, xsum, BINARY, MAXIMIZE, OptimizationStatus  # type: ignore
+    _MIP_AVAILABLE = True
+except Exception:
+    _MIP_AVAILABLE = False
+
 
 # Map backend model names to CSV column names
 MODEL_COL = {
@@ -155,8 +162,151 @@ def _solve_greedy(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, f
     )
     return res
 
+def _solve_mip(df_base: pd.DataFrame, channels: Dict[str, Tuple[int, float, float]], budget: float) -> pd.DataFrame:
+    """
+    Advanced optimization using Mixed-Integer Programming.
+    Maximizes expected revenue with constraints: budget, one offer per client, channel limits.
+    Falls back to greedy if MIP is unavailable.
+    """
+    if not _MIP_AVAILABLE:
+        print("[optimizer][warn] mip is not available; falling back to greedy")
+        return _solve_greedy(df_base, channels, budget)
 
-def run_optimizer(frontend_model: str, budget: float, enable_rr: bool, channels: Dict[str, List[float]], products: Dict[str, float]):
+    channel_names = list(channels.keys())
+    ch_cost = {k: float(v[1]) for k, v in channels.items()}
+    ch_prob = {k: float(v[2]) for k, v in channels.items()}
+    ch_limit = {k: int(v[0]) for k, v in channels.items()}
+
+    # Row-level preselection: keep only top-K (client, product) rows by potential upper revenue per product
+    # upper_rev = product_revenue * affinity_prob * max_channel_prob
+    rows_before = len(df_base)
+    try:
+        max_rr = max(ch_prob.values()) if len(ch_prob) > 0 else 0.025
+    except Exception:
+        max_rr = 0.025
+    df_base = df_base.copy()
+    df_base["__upper_rev"] = df_base["product_revenue"].astype(float) * df_base["affinity_prob"].astype(float) * float(max_rr)
+
+    # Estimate possible number of offers (very rough upper bound)
+    total_limit = sum(max(0, int(v)) for v in ch_limit.values()) or float("inf")
+    positive_costs = [c for c in (ch_cost.get(k, 0.0) for k in ch_cost.keys()) if c and c > 0]
+    min_cost = min(positive_costs) if positive_costs else 0.0
+    offers_by_budget = (float(budget) / min_cost) if min_cost > 0 else float("inf")
+    offers_by_clients = df_base["client_id"].nunique()
+    offers_possible = int(min(total_limit, offers_by_budget, offers_by_clients)) if offers_by_clients > 0 else 0
+
+    factor = 10  # how many times larger candidate pool vs feasible number of offers
+    K_global = rows_before if offers_possible <= 0 else min(rows_before, max(1, factor * offers_possible))
+
+    # Allocate K across products proportionally to their presence
+    groups = df_base.groupby("product_id", sort=False)
+    parts = []
+    for pid, g in groups:
+        share = len(g) / rows_before if rows_before > 0 else 0
+        k_pid = int(max(10000, share * K_global))  # at least 10k per product if available
+        k_pid = min(k_pid, len(g))
+        parts.append(g.nlargest(k_pid, "__upper_rev"))
+    if parts:
+        df_base = pd.concat(parts, ignore_index=True)
+    df_base.drop(columns=["__upper_rev"], inplace=True, errors="ignore")
+    rows_after = len(df_base)
+    if rows_before > 0:
+        print(f"[optimizer][mip] rows_before={rows_before} rows_after={rows_after} shrink≈{(rows_before/max(1,rows_after)):.2f}x")
+
+    m = Model(sense=MAXIMIZE, solver_name='CBC')
+    m.verbose = 0
+
+    x_vars: Dict[Tuple[int, str], any] = {}
+    rev_coeff: Dict[Tuple[int, str], float] = {}
+    cost_coeff: Dict[Tuple[int, str], float] = {}
+
+    # Pre-calculate candidate reduction stats (after row capping)
+    total_candidates = len(df_base) * len(channel_names)
+    kept_candidates = 0
+
+    # For each (client, product) row keep only the best channel by profit (exp_rev - cost),
+    # and only if exp_rev > cost
+    for row in df_base.itertuples(index=True):
+        ridx = int(row.Index)
+        p_aff = float(getattr(row, 'affinity_prob'))
+        price = float(getattr(row, 'product_revenue'))
+        if p_aff <= 0:
+            continue
+        best_ch = None
+        best_rev = 0.0
+        best_cost = 0.0
+        best_profit = float('-inf')
+        for ch in channel_names:
+            rev = price * p_aff * ch_prob[ch]
+            cost = ch_cost[ch]
+            if rev <= cost:
+                continue  # prefilter: must be profitable
+            profit = rev - cost
+            if profit > best_profit:
+                best_profit = profit
+                best_ch = ch
+                best_rev = rev
+                best_cost = cost
+        if best_ch is not None:
+            key = (ridx, best_ch)
+            x_vars[key] = m.add_var(var_type=BINARY)
+            rev_coeff[key] = best_rev
+            cost_coeff[key] = best_cost
+            kept_candidates += 1
+
+    if not x_vars:
+        return pd.DataFrame(columns=["client_id", "product_id", "canal_id", "cost", "expected_revenue"])  # empty
+
+    # Log candidate reduction
+    if total_candidates > 0:
+        red = total_candidates / max(1, kept_candidates) if kept_candidates > 0 else float('inf')
+        print(f"[optimizer][mip] candidates_before={total_candidates} candidates_after={kept_candidates} reduction≈{red:.2f}x")
+
+    # Objective and constraints
+    m.objective = xsum(x_vars[k] * rev_coeff[k] for k in x_vars)
+    m += xsum(x_vars[k] * cost_coeff[k] for k in x_vars) <= float(budget)
+
+    # Per-client at most one
+    from collections import defaultdict
+    client_to_keys: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
+    for (ridx, ch) in x_vars.keys():
+        client_to_keys[str(df_base.loc[ridx, 'client_id'])].append((ridx, ch))
+    for keys in client_to_keys.values():
+        m += xsum(x_vars[k] for k in keys) <= 1
+
+    # Channel limits
+    ch_to_keys: Dict[str, List[Tuple[int, str]]] = {ch: [] for ch in channel_names}
+    for k in x_vars.keys():
+        ch_to_keys[k[1]].append(k)
+    for ch in channel_names:
+        m += xsum(x_vars[k] for k in ch_to_keys.get(ch, [])) <= ch_limit.get(ch, 0)
+
+    t0 = time.time()
+    m.optimize()
+    print(f"[optimizer][mip] solved in {time.time()-t0:.3f}s status={getattr(m, 'status', None)} obj={getattr(m, 'objective_value', None)}")
+
+    rows: List[Dict[str, any]] = []
+    ok = hasattr(m, 'status') and m.status in (OptimizationStatus.OPTIMAL, OptimizationStatus.FEASIBLE)
+    if ok:
+        for (ridx, ch), var in x_vars.items():
+            try:
+                val = float(var.x)
+            except Exception:
+                val = 0.0
+            if val >= 0.99:
+                rows.append({
+                    'client_id': df_base.loc[ridx, 'client_id'],
+                    'product_id': df_base.loc[ridx, 'product_id'],
+                    'canal_id': ch,
+                    'cost': float(cost_coeff[(ridx, ch)]),
+                    'expected_revenue': float(rev_coeff[(ridx, ch)]),
+                })
+    else:
+        print("[optimizer][mip] no feasible solution; returning empty")
+
+    return pd.DataFrame(rows)
+
+def run_optimizer(frontend_model: str, budget: float, enable_rr: bool, channels: Dict[str, List[float]], products: Dict[str, float], advanced: bool = False):
     """
     Returns dict(summary, channels_usage, products_distribution) compatible with OptimizeResponse.
     """
@@ -197,7 +347,7 @@ def run_optimizer(frontend_model: str, budget: float, enable_rr: bool, channels:
 
     t0 = time.time()
     df_base = _build_base_df(products, frontend_model)
-    df_res = _solve_greedy(df_base, ch3, float(budget))
+    df_res = _solve_mip(df_base, ch3, float(budget)) if advanced else _solve_greedy(df_base, ch3, float(budget))
     print(f"[optimizer] total optimization time={time.time()-t0:.3f}s (base+solve)")
 
     # Build response
@@ -249,7 +399,7 @@ def run_optimizer(frontend_model: str, budget: float, enable_rr: bool, channels:
     return {"summary": summary, "channels_usage": channels_usage, "products_distribution": products_distribution}
 
 
-def run_optimizer_csv(frontend_model: str, budget: float, enable_rr: bool, channels: Dict[str, List[float]], products: Dict[str, float]) -> str:
+def run_optimizer_csv(frontend_model: str, budget: float, enable_rr: bool, channels: Dict[str, List[float]], products: Dict[str, float], advanced: bool = False) -> str:
     """
     Same inputs as run_optimizer. Returns CSV text for the selected offers.
     Columns: client_id, product_id, canal_id, cost, expected_revenue
@@ -283,7 +433,7 @@ def run_optimizer_csv(frontend_model: str, budget: float, enable_rr: bool, chann
         ch3[k] = (max(0, limit), max(0.0, cost), rr)
 
     df_base = _build_base_df(products, frontend_model)
-    df_res = _solve_greedy(df_base, ch3, float(budget))
+    df_res = _solve_mip(df_base, ch3, float(budget)) if advanced else _solve_greedy(df_base, ch3, float(budget))
     if df_res.empty:
         return "client_id,product_id,canal_id,cost,expected_revenue\n"
     # ensure column order and export

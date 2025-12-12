@@ -28,6 +28,7 @@ async def optimize(req: OptimizeRequest):
         enable_rr=req.enable_rr,
         channels=req.channels,
         products=req.products,
+        advanced=req.advanced,
     )
     dt = time.time() - t0
     print(f"/optimize done in {dt:.3f}s; channels={len(req.channels)} products={len(req.products)} budget={req.budget}")
@@ -49,5 +50,6 @@ async def optimize_csv(req: OptimizeRequest):
         enable_rr=req.enable_rr,
         channels=req.channels,
         products=req.products,
+        advanced=req.advanced,
     )
     return Response(content=csv_text, media_type="text/csv")
